@@ -14,31 +14,34 @@ from blocks.graph import ComputationGraph, apply_noise, apply_dropout
 # An epoch will be composed of 'num_seqs' sequences of len 'seq_len'
 # divided in chunks of lengh 'seq_div_size'
 num_seqs = 20
-seq_len = 2000
-seq_div_size = 100
+seq_len = 5000
+seq_div_size = 200
 
 io_dim = 256
 
-hidden_dims = [512, 512, 512]
+hidden_dims = [1024, 1024, 1024]
 activation_function = Tanh()
 
 i2h_all = True             # input to all hidden layers or only first layer
 h2o_all = True             # all hiden layers to output or only last layer
 
-w_noise_std = 0.01
+w_noise_std = 0.02
 i_dropout = 0.5
 
-step_rule = 'momentum'
+l1_reg = 0
+
+step_rule = 'adadelta'
 learning_rate = 0.1
 momentum = 0.9
 
 
-param_desc = '%s-%sIH,%sHO-n%s-d%s-%dx%d(%d)-%s' % (
+param_desc = '%s-%sIH,%sHO-n%s-d%s-l1r%s-%dx%d(%d)-%s' % (
                  repr(hidden_dims),
                  'all' if i2h_all else 'first',
                  'all' if h2o_all else 'last',
                  repr(w_noise_std),
                  repr(i_dropout),
+                 repr(l1_reg),
                  num_seqs, seq_len, seq_div_size,
                  step_rule
                 ) 
@@ -46,8 +49,9 @@ param_desc = '%s-%sIH,%sHO-n%s-d%s-%dx%d(%d)-%s' % (
 save_freq = 5
 
 # parameters for sample generation
-sample_len = 60
-sample_temperature = 0.3
+sample_len = 1000
+sample_temperature = 0.7 #0.5
+sample_freq = 10
 
 if step_rule == 'rmsprop':
     step_rule = RMSProp()
@@ -68,9 +72,9 @@ class Model():
 
         # Construct hidden states
         dims = [io_dim] + hidden_dims
-        states = [in_onehot.dimshuffle(1, 0, 2)]
+        hidden = [in_onehot.dimshuffle(1, 0, 2)]
         bricks = []
-        updates = []
+        states = []
         for i in xrange(1, len(dims)):
             init_state = theano.shared(numpy.zeros((num_seqs, dims[i])).astype(theano.config.floatX),
                                        name='st0_%d'%i)
@@ -80,32 +84,32 @@ class Model():
             linear = Linear(input_dim=dims[i-1], output_dim=4*dims[i],
                             name="lstm_in_%d"%i)
             bricks.append(linear)
-            inter = linear.apply(states[-1])
+            inter = linear.apply(hidden[-1])
 
             if i2h_all and i > 1:
                 linear2 = Linear(input_dim=dims[0], output_dim=4*dims[i],
                                  name="lstm_in0_%d"%i)
                 bricks.append(linear2)
-                inter = inter + linear2.apply(states[0])
+                inter = inter + linear2.apply(hidden[0])
                 inter.name = 'inter_bis_%d'%i
 
             lstm = LSTM(dim=dims[i], activation=activation_function,
                         name="lstm_rec_%d"%i)
             bricks.append(lstm)
 
-            new_states, new_cells = lstm.apply(inter,
+            new_hidden, new_cells = lstm.apply(inter,
                                                states=init_state,
                                                cells=init_cell)
-            updates.append((init_state, new_states[-1, :, :]))
-            updates.append((init_cell, new_cells[-1, :, :]))
+            states.append((init_state, new_hidden[-1, :, :]))
+            states.append((init_cell, new_cells[-1, :, :]))
 
-            states.append(new_states)
+            hidden.append(new_hidden)
 
-        states = [s.dimshuffle(1, 0, 2) for s in states]
+        hidden = [s.dimshuffle(1, 0, 2) for s in hidden]
 
         # Construct output from hidden states
         out = None
-        layers = zip(dims, states)[1:]
+        layers = zip(dims, hidden)[1:]
         if not h2o_all:
             layers = [layers[-1]]
         for i, (dim, state) in enumerate(layers):
@@ -136,8 +140,13 @@ class Model():
             noise_vars = VariableFilter(roles=[WEIGHT])(cg)
             cg = apply_noise(cg, noise_vars, w_noise_std)
         if i_dropout > 0:
-            cg = apply_dropout(cg, states[1:], i_dropout)
+            cg = apply_dropout(cg, hidden[1:], i_dropout)
         [cost_reg, error_rate_reg] = cg.outputs
+
+        # add l1 regularization
+        if l1_reg > 0:
+            l1pen = sum(abs(st).mean() for st in hidden[1:])
+            cost_reg = cost_reg + l1_reg * l1pen
 
         self.cost = cost
         self.error_rate = error_rate
@@ -146,5 +155,5 @@ class Model():
         self.out = out
         self.pred = pred
 
-        self.updates = updates
+        self.states = states
 

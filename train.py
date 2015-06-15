@@ -27,6 +27,8 @@ import datastream
 logging.basicConfig(level='INFO')
 logger = logging.getLogger(__name__)
 
+sys.setrecursionlimit(1500)
+
 if __name__ == "__main__":
     if len(sys.argv) != 2:
         print >> sys.stderr, 'Usage: %s config' % sys.argv[0]
@@ -37,9 +39,10 @@ if __name__ == "__main__":
 
 class GenText(SimpleExtension):
     def __init__(self, model, init_text, max_bytes, **kwargs):
+        super(GenText, self).__init__(**kwargs)
+        
         self.init_text = init_text
         self.max_bytes = max_bytes
-
 
         out = model.out[:, -1, :] / numpy.float32(config.sample_temperature)
         prob = tensor.nnet.softmax(out)
@@ -47,24 +50,53 @@ class GenText(SimpleExtension):
         cg = ComputationGraph([prob])
         assert(len(cg.inputs) == 1)
         assert(cg.inputs[0].name == 'bytes')
-        self.f = theano.function(inputs=cg.inputs, outputs=[prob])
 
-        super(GenText, self).__init__(**kwargs)
+        state_vars = [theano.shared(v[0:1, :].zeros_like().eval(), v.name+'-gen')
+                                for v, _ in model.states]
+        givens = [(v, x) for (v, _), x in zip(model.states, state_vars)]
+        updates= [(x, upd) for x, (_, upd) in zip(state_vars, model.states)] 
+
+        self.f = theano.function(inputs=cg.inputs, outputs=[prob],
+                                 givens=givens, updates=updates)
+        self.reset_states = theano.function(inputs=[], outputs=[],
+                                            updates=[(v, v.zeros_like()) for v in state_vars])
 
     def do(self, which_callback, *args):
+
+        print "Sample:"
+        print "-------"
+
+        self.reset_states()
+
         v = numpy.array([ord(i) for i in self.init_text],
-                        dtype='int16')[None, :].repeat(axis=0, repeats=config.num_seqs)
+                        dtype='int16')[None, :]
+        prob, = self.f(v)
 
+        sys.stdout.write(self.init_text)
         while v.shape[1] < self.max_bytes:
-            prob, = self.f(v)
             prob = prob / 1.00001
-            pred = numpy.zeros((prob.shape[0],), dtype='int16')
-            for i in range(prob.shape[0]):
-                pred[i] = numpy.random.multinomial(1, prob[i, :]).nonzero()[0][0]
-            v = numpy.concatenate([v, pred[:, None]], axis=1)
+            pred = numpy.random.multinomial(1, prob[0, :]).nonzero()[0][0]
 
-        for i in range(v.shape[0]):
-            print "Sample:", ''.join([chr(int(v[i, j])) for j in range(v.shape[1])])
+            v = numpy.concatenate([v, pred[None, None]], axis=1)
+            sys.stdout.write(chr(int(pred)))
+            sys.stdout.flush()
+
+            prob, = self.f(pred[None, None])
+        print
+        print "-------"
+        print
+
+
+class ResetStates(SimpleExtension):
+    def __init__(self, state_vars, **kwargs):
+        super(ResetStates, self).__init__(**kwargs)
+
+        self.f = theano.function(
+            inputs=[], outputs=[],
+            updates=[(v, v.zeros_like()) for v in state_vars])
+
+    def do(self, which_callback, *args):
+        self.f()
 
 def train_model(m, train_stream, dump_path=None):
 
@@ -76,17 +108,17 @@ def train_model(m, train_stream, dump_path=None):
                                 step_rule=config.step_rule,
                                 params=cg.parameters)
 
-    algorithm.add_updates(m.updates)
+    algorithm.add_updates(m.states)
 
     # Load the parameters from a dumped model
     if dump_path is not None:
         try:
-            logger.info('Loading parameters...')
             with closing(numpy.load(dump_path)) as source:
+                logger.info('Loading parameters...')
                 param_values = {'/' + name.replace(BRICK_DELIMITER, '/'): source[name]
                                     for name in source.keys()
                                     if name != 'pkl' and not 'None' in name}
-            model.set_param_values(param_values)
+                model.set_param_values(param_values)
         except IOError:
             pass
 
@@ -96,19 +128,24 @@ def train_model(m, train_stream, dump_path=None):
         algorithm=algorithm,
         extensions=[
             Checkpoint(path=dump_path,
-                       after_epoch=False, every_n_epochs=config.save_freq),
+                       after_epoch=False,
+                       use_cpickle=True,
+                       every_n_epochs=config.save_freq),
 
             TrainingDataMonitoring(
                 [m.cost_reg, m.error_rate_reg, m.cost, m.error_rate],
                 prefix='train', every_n_epochs=1),
             Printing(every_n_epochs=1, after_epoch=False),
-            Plot(document='tr_'+model_name+'_'+config.param_desc,
+            Plot(document='text_'+model_name+'_'+config.param_desc,
                  channels=[['train_cost', 'train_cost_reg'],
                            ['train_error_rate', 'train_error_rate_reg']],
                  server_url='http://eos21:4201/',
                  every_n_epochs=1, after_epoch=False),
 
-            GenText(m, ' ', config.sample_len, every_n_epochs=1, after_epoch=False)
+            GenText(m, '\nalex\ttu crois ?\n', config.sample_len,
+                    every_n_epochs=config.sample_freq,
+                    after_epoch=False, before_training=True),
+            ResetStates([v for v, _ in m.states], after_epoch=True)
         ]
     )
     main_loop.run()
