@@ -30,7 +30,10 @@ class IRCClient(SimpleIRCClient):
     def on_join(self, server, ev):
         self.server = server
 
-    def pred_line(self, pred_f, prob):
+    def str2data(self, s):
+        return numpy.array([ord(x) for x in s], dtype='int16')[None, :]
+
+    def pred_until(self, pred_f, prob, delim='\n'):
         s = ''
         while True:
             prob = prob / 1.00001
@@ -40,11 +43,13 @@ class IRCClient(SimpleIRCClient):
 
             prob, = pred_f(pred[None, None])
 
-            if s[-1] == '\n':
+            if s[-1] == delim:
                 break
         return s[:-1]
 
     def privmsg(self, chan, msg):
+        if len(msg) > 500:
+            msg = 'blip bloup'
         logger.info("%s >> %s" % (chan, msg))
         self.server.privmsg(chan, msg.decode('utf-8', 'ignore'))
 
@@ -62,21 +67,20 @@ class IRCClient(SimpleIRCClient):
         if chan in self.chans:
             pred_f, _ = self.chans[chan]
             if s0[-2:] == '^I':
-                prob, = pred_f(numpy.array([ord(x) for x in s0[:-2]], dtype='int16')[None, :])
-                s = self.pred_line(pred_f, prob)
-                rep = s0[:-2] + s
+                prob, = pred_f(self.str2data(s0[:-2]))
+                rep = s0[:-2] + self.pred_until(pred_f, prob)
+                rep = rep.split('\t', 1)[-1]
             else:
                 # feed phrase to bot
-                prob, = pred_f(numpy.array([ord(x) for x in s0+'\n'], dtype='int16')[None, :])
-                if msg[:len(self.nick)+1] == self.nick+':':
-                    #TODO: make it so that it predicts a message beginning by 'nick: '
-                    # (ie it responds to the person who pinged it)
-                    rep = self.pred_line(pred_f, prob) 
+                prob, = pred_f(self.str2data(s0+'\n'))
+                if self.nick in msg:
+                    self.pred_until(pred_f, prob, '\t') 
+                    prob, = pred_f(self.str2data(nick+': '))
+                    rep = nick + ': ' + self.pred_until(pred_f, prob)
         else:
             pass
 
         if rep != None:
-            rep = rep.split('\t', 1)[1]
             self.privmsg(chan, rep)
 
 class IRCClientExt(SimpleExtension):

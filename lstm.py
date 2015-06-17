@@ -47,11 +47,12 @@ param_desc = '%s-%sIH,%sHO-n%s-d%s-l1r%s-%dx%d(%d)-%s' % (
                 ) 
 
 save_freq = 5
+on_irc = True
 
 # parameters for sample generation
 sample_len = 1000
 sample_temperature = 0.7 #0.5
-sample_freq = 10
+sample_freq = None
 
 if step_rule == 'rmsprop':
     step_rule = RMSProp()
