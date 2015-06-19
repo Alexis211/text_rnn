@@ -2,8 +2,8 @@ import theano
 from theano import tensor
 import numpy
 
-from blocks.algorithms import Momentum, AdaDelta, RMSProp
-from blocks.bricks import Tanh, Logistic, Softmax, Rectifier, Linear, MLP, Initializable, Identity
+from blocks.algorithms import Momentum, AdaDelta, RMSProp, Adam
+from blocks.bricks import Activation, Tanh, Logistic, Softmax, Rectifier, Linear, MLP, Initializable, Identity
 from blocks.bricks.base import application, lazy
 from blocks.bricks.recurrent import BaseRecurrent, recurrent
 from blocks.initialization import IsotropicGaussian, Constant
@@ -13,44 +13,51 @@ from blocks.filter import VariableFilter
 from blocks.roles import WEIGHT, INITIAL_STATE, add_role
 from blocks.graph import ComputationGraph, apply_noise, apply_dropout
 
+class TRectifier(Activation):
+    @application(inputs=['input_'], outputs=['output'])
+    def apply(self, input_):
+        return tensor.switch(input_ > 1, input_, 0)
+
 # An epoch will be composed of 'num_seqs' sequences of len 'seq_len'
 # divided in chunks of lengh 'seq_div_size'
 num_seqs = 10
 seq_len = 2000
-seq_div_size = 200
+seq_div_size = 100
 
 io_dim = 256
 
 recurrent_blocks = [
 #            (256, Tanh(), [2048], [Rectifier()]),
-            (512, Tanh(), [], []),
-            (512, Tanh(), [1024], [Rectifier()]),
-            (512, Tanh(), [], []),
+#            (512, Rectifier(), [1024], [Rectifier()]),
+            (512, Tanh(), [2048], [TRectifier()]),
+            (512, Tanh(), [2048], [TRectifier()]),
+            (512, Tanh(), [2048], [TRectifier()]),
 #            (2, Tanh(), [2], [Rectifier()]),
 #            (2, Tanh(), [], []),
         ]
 
-control_hidden = [512]
-control_hidden_activations = [Tanh()]
+control_hidden = [1024]
+control_hidden_activations = [Rectifier()]
 
 output_hidden = [1024]
 output_hidden_activations = [Rectifier()]
 
-weight_noise_std = 0.02
-recurrent_dropout = 0.5
-control_dropout = 0.5
+weight_noise_std = 0.05
 
-step_rule = 'adadelta'
+recurrent_h_dropout = 0
+control_h_dropout = 0
+output_h_dropout = 0.5
+
+step_rule = 'adam'
 learning_rate = 0.1
-momentum = 0.9
+momentum = 0.99
 
 
-param_desc = '%s,c%s,o%s-n%s-d%s,%s-%dx%d(%d)-%s' % (
+param_desc = '%s,c%s,o%s-n%s-d%s,%s,%s-%s' % (
                  repr(map(lambda (a, b, c, d): (a, c), recurrent_blocks)),
                  repr(control_hidden), repr(output_hidden),
                  repr(weight_noise_std),
-                 repr(recurrent_dropout), repr(control_dropout),
-                 num_seqs, seq_len, seq_div_size,
+                 repr(recurrent_h_dropout), repr(control_h_dropout), repr(output_h_dropout),
                  step_rule
                 ) 
 
@@ -68,8 +75,12 @@ elif step_rule == 'adadelta':
     step_rule = AdaDelta()
 elif step_rule == 'momentum':
     step_rule = Momentum(learning_rate=learning_rate, momentum=momentum)
+elif step_rule == 'adam':
+    step_rule = Adam()
 else:
     assert(False)
+
+
 
 
 class GFGRU(BaseRecurrent, Initializable):
@@ -94,7 +105,7 @@ class GFGRU(BaseRecurrent, Initializable):
         self.hidden_total_dim = sum(x for (x, _, _, _) in self.recurrent_blocks)
 
         # control block
-        self.cblocklen = len(self.recurrent_blocks) + 3
+        self.cblocklen = len(self.recurrent_blocks) + 2
 
         control_idim = self.hidden_total_dim + self.input_dim
         control_odim = len(self.recurrent_blocks) * self.cblocklen
@@ -111,19 +122,19 @@ class GFGRU(BaseRecurrent, Initializable):
             idim = self.input_dim + self.hidden_total_dim
             if i > 0:
                 idim = idim + self.recurrent_blocks[i-1][0]
-            rgate = MLP(dims=[self.hidden_total_dim, self.hidden_total_dim],
-                        activations=[logistic],
-                        name='rgate%d'%i)
+
             idims = [idim] + hdim
             if hdim == []:
                 inter = Identity()
             else:
                 inter = MLP(dims=idims, activations=hact, name='inter%d'%i)
-            zgate = MLP(dims=[idims[-1], dim], activations=[logistic], name='zgate%d'%i)
+
+            rgate = MLP(dims=[idims[-1], dim], activations=[logistic], name='rgate%d'%i)
             nstate = MLP(dims=[idims[-1], dim], activations=[act], name='nstate%d'%i)
-            for brick in [rgate, inter, zgate, nstate]:
+
+            for brick in [inter, rgate, nstate]:
                 self.children.append(brick)
-            self.blocks.append((rgate, inter, zgate, nstate))
+            self.blocks.append((inter, rgate, nstate))
 
         # init state zeros
         self.init_states_names = []
@@ -144,6 +155,17 @@ class GFGRU(BaseRecurrent, Initializable):
             return self.init_states_dict[name].shape.eval()
         return super(GFGRU, self).get_dim(name)
 
+    def recurrent_h_dropout_vars(self, cg):
+        ret = []
+        for (inter, rgate, nstate) in self.blocks:
+            ret = ret + VariableFilter(name='input_',
+                                       bricks=inter.linear_transformations + rgate.linear_transformations + nstate.linear_transformations
+                                      )(cg)
+        return ret
+
+    def control_h_dropout_vars(self, cg):
+        return VariableFilter(name='input_', bricks=self.control.linear_transformations)(cg)
+
     @recurrent(sequences=['inputs'], contexts=[])
     def apply(self, inputs=None, **kwargs):
         states = [kwargs[i] for i in self.init_states_names]
@@ -154,23 +176,24 @@ class GFGRU(BaseRecurrent, Initializable):
         control_v = self.control.apply(concat_input_states)
 
         new_states = []
-        for i, (rgate, inter, zgate, nstate) in enumerate(self.blocks):
+        for i, (inter, rgate, nstate) in enumerate(self.blocks):
             controls = control_v[:, i * self.cblocklen:(i+1) * self.cblocklen]
-            rgate_v = rgate.apply(concat_states)
             r_inputs = tensor.concatenate([s * controls[:, j][:, None] for j, s in enumerate(states)], axis=1)
-            r_inputs = r_inputs * (1 - rgate_v * controls[:, -1][:, None])
 
             more_inputs = [inputs]
             if i > 0:
-                more_inputs = more_inputs + [new_states[-1]]
+                more_inputs.append(new_states[-1])
             inter_inputs = tensor.concatenate([r_inputs] + more_inputs, axis=1)
 
             inter_v = inter.apply(inter_inputs)
-            zgate_v = zgate.apply(inter_v)
+
+            rgate_v = rgate.apply(inter_v)
             nstate_v = nstate.apply(inter_v)
 
-            zctl = zgate_v * controls[:, -2][:, None] + controls[:, -3][:, None]
-            nstate_v = zctl * nstate_v + (1 - zctl) * states[i]
+            rctl = controls[:, -1][:, None] * rgate_v
+            uctl = controls[:, -2][:, None]
+            nstate_v = uctl * nstate_v + (1 - rctl) * states[i]
+
             new_states.append(nstate_v)
 
         return new_states
@@ -206,16 +229,24 @@ class Model():
 
         hidden_total_dim = sum(x for (x, _, _, _) in recurrent_blocks)
 
-        prev_states = theano.shared(numpy.zeros((num_seqs, hidden_total_dim)).astype(theano.config.floatX),
+        prev_states_dict = {}
+        for i, (dim, _, _, _) in enumerate(recurrent_blocks):
+            prev_state = theano.shared(numpy.zeros((num_seqs, dim)).astype(theano.config.floatX),
                                     name='states_save')
-        states = [x.dimshuffle(1, 0, 2) for x in gfgru.apply(in_onehot.dimshuffle(1, 0, 2), states=prev_states)]
-        states = tensor.concatenate(states, axis=2)
-        new_states = states[:, -1, :]
+            prev_states_dict['init_state_%d'%i] = prev_state
+
+        states = [x.dimshuffle(1, 0, 2) for x in gfgru.apply(in_onehot.dimshuffle(1, 0, 2), **prev_states_dict)]
+
+        self.states = []
+        for i, _ in enumerate(recurrent_blocks):
+            self.states.append((prev_states_dict['init_state_%d'%i], states[i][:, -1, :]))
+
+        states_concat = tensor.concatenate(states, axis=2)
 
         out_mlp = MLP(dims=[hidden_total_dim] + output_hidden + [io_dim],
                       activations=output_hidden_activations + [None],
                       name='output_mlp')
-        states_sh = states.reshape((inp.shape[0]*inp.shape[1], hidden_total_dim))
+        states_sh = states_concat.reshape((inp.shape[0]*inp.shape[1], hidden_total_dim))
         out = out_mlp.apply(states_sh).reshape((inp.shape[0], inp.shape[1], io_dim))
 
 
@@ -230,8 +261,8 @@ class Model():
 
         # Initialize all bricks
         for brick in [gfgru, out_mlp]:
-            brick.weights_init = IsotropicGaussian(0.1)
-            brick.biases_init = Constant(0.)
+            brick.weights_init = IsotropicGaussian(0.01)
+            brick.biases_init = Constant(0.001)
             brick.initialize()
 
         # Apply noise and dropout
@@ -239,8 +270,18 @@ class Model():
         if weight_noise_std > 0:
             noise_vars = VariableFilter(roles=[WEIGHT])(cg)
             cg = apply_noise(cg, noise_vars, weight_noise_std)
-        # if i_dropout > 0:
-        #     cg = apply_dropout(cg, hidden[1:], i_dropout)
+        if recurrent_h_dropout > 0:
+            dv = gfgru.recurrent_h_dropout_vars(cg)
+            print "Recurrent H dropout on", len(dv), "vars"
+            cg = apply_dropout(cg, dv, recurrent_h_dropout)
+        if control_h_dropout > 0:
+            dv = gfgru.control_h_dropout_vars(cg)
+            print "Control H dropout on", len(dv), "vars"
+            cg = apply_dropout(cg, dv, control_h_dropout)
+        if output_h_dropout > 0:
+            dv = VariableFilter(name='input_', bricks=out_mlp.linear_transformations)(cg)
+            print "Output H dropout on", len(dv), "vars"
+            cg = apply_dropout(cg, dv, output_h_dropout)
         [cost_reg, error_rate_reg] = cg.outputs
 
 
@@ -251,5 +292,4 @@ class Model():
         self.out = out
         self.pred = pred
 
-        self.states = [(prev_states, new_states)]
 
