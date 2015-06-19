@@ -29,9 +29,8 @@ io_dim = 256
 recurrent_blocks = [
 #            (256, Tanh(), [2048], [Rectifier()]),
 #            (512, Rectifier(), [1024], [Rectifier()]),
-            (512, Tanh(), [2048], [TRectifier()]),
-            (512, Tanh(), [2048], [TRectifier()]),
-            (512, Tanh(), [2048], [TRectifier()]),
+            (512, Tanh(), [1024], [Rectifier()]),
+            (512, Tanh(), [1024], [Rectifier()]),
 #            (2, Tanh(), [2], [Rectifier()]),
 #            (2, Tanh(), [], []),
         ]

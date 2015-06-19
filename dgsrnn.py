@@ -29,27 +29,25 @@ io_dim = 256
 state_dim = 1024
 activation = Tanh()
 transition_hidden = [1024, 1024]
-transition_hidden_activations = [Tanh(), Tanh()]
-
-max_reset = 0.8
+transition_hidden_activations = [Rectifier(), Rectifier()]
 
 output_hidden = []
 output_hidden_activations = []
 
 weight_noise_std = 0.05
 
-output_h_dropout = 0.0
+output_h_dropout = 0.5
 
-l1_state = 0.1
-l1_reset = 1
+l1_state = 0.01
+l1_reset = 0.01
 
-step_rule = 'adam'
-learning_rate = 0.1
+step_rule = 'momentum'
+learning_rate = 0.01
 momentum = 0.99
 
 
-param_desc = '%s,t%s,o%s,mr%s-n%s-d%s-L1:%s,%s-%s' % (
-                 repr(state_dim), repr(transition_hidden), repr(output_hidden), repr(max_reset),
+param_desc = '%s,t%s,o%s-n%s-d%s-L1:%s,%s-%s' % (
+                 repr(state_dim), repr(transition_hidden), repr(output_hidden),
                  repr(weight_noise_std),
                  repr(output_h_dropout),
                  repr(l1_state), repr(l1_reset),
@@ -78,24 +76,25 @@ else:
 
 
 class DGSRNN(BaseRecurrent, Initializable):
-    def __init__(self, input_dim, state_dim, act, transition_h, tr_h_activations, max_reset, **kwargs):
+    def __init__(self, input_dim, state_dim, act, transition_h, tr_h_activations, **kwargs):
         super(DGSRNN, self).__init__(**kwargs)
 
         self.input_dim = input_dim
         self.state_dim = state_dim
-        self.max_reset = max_reset
+
+        logistic = Logistic()
 
         self.inter = MLP(dims=[input_dim + state_dim] + transition_h,
                          activations=tr_h_activations,
                          name='inter')
         self.reset = MLP(dims=[transition_h[-1], state_dim],
-                         activations=[Logistic()],
+                         activations=[logistic],
                          name='reset')
         self.update = MLP(dims=[transition_h[-1], state_dim],
                           activations=[act],
                           name='update')
 
-        self.children = [self.inter, self.reset, self.update]
+        self.children = [self.inter, self.reset, self.update, logistic, act] + tr_h_activations
 
         # init state
         self.params = [shared_floatx_zeros((state_dim,), name='init_state')]
@@ -109,15 +108,13 @@ class DGSRNN(BaseRecurrent, Initializable):
     @recurrent(sequences=['inputs'], states=['state'],
                outputs=['state', 'reset'], contexts=[])
     def apply(self, inputs=None, state=None):
-
         inter_v = self.inter.apply(tensor.concatenate([inputs, state], axis=1))
         reset_v = self.reset.apply(inter_v)
         update_v = self.update.apply(inter_v)
 
-        new_state = state * (1 - max_reset * reset_v) + update_v
+        new_state = state * (1 - reset_v) + reset_v * update_v
 
         return new_state, reset_v
-
 
     @application
     def initial_state(self, state_name, batch_size, *args, **kwargs):
@@ -125,7 +122,6 @@ class DGSRNN(BaseRecurrent, Initializable):
                              repeats=batch_size,
                              axis=0)
             
-
 
 class Model():
     def __init__(self):
@@ -140,7 +136,6 @@ class Model():
                         act=activation,
                         transition_h=transition_hidden,
                         tr_h_activations=transition_hidden_activations,
-                        max_reset=max_reset,
                         name='dgsrnn')
 
         prev_state = theano.shared(numpy.zeros((num_seqs, state_dim)).astype(theano.config.floatX),
@@ -169,12 +164,12 @@ class Model():
 
         # Initialize all bricks
         for brick in [dgsrnn, out_mlp]:
-            brick.weights_init = IsotropicGaussian(0.01)
-            brick.biases_init = Constant(0.001)
+            brick.weights_init = IsotropicGaussian(0.001)
+            brick.biases_init = Constant(0.0)
             brick.initialize()
 
         # Apply noise and dropout
-        cg = ComputationGraph([cost, error_rate])
+        cg = ComputationGraph([cost, error_rate, states, resets])
         if weight_noise_std > 0:
             noise_vars = VariableFilter(roles=[WEIGHT])(cg)
             cg = apply_noise(cg, noise_vars, weight_noise_std)
@@ -182,7 +177,7 @@ class Model():
             dv = VariableFilter(name='input_', bricks=out_mlp.linear_transformations)(cg)
             print "Output H dropout on", len(dv), "vars"
             cg = apply_dropout(cg, dv, output_h_dropout)
-        [cost_reg, error_rate_reg] = cg.outputs
+        [cost_reg, error_rate_reg, states, resets] = cg.outputs
 
         if l1_state > 0:
             cost_reg = cost_reg + l1_state * abs(states).mean()
