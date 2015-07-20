@@ -2,6 +2,8 @@ import theano
 from theano import tensor
 import numpy
 
+from theano.tensor.shared_randomstreams import RandomStreams
+
 from blocks.algorithms import Momentum, AdaDelta, RMSProp, Adam
 from blocks.bricks import Activation, Tanh, Logistic, Softmax, Rectifier, Linear, MLP, Initializable, Identity
 from blocks.bricks.base import application, lazy
@@ -13,6 +15,8 @@ from blocks.filter import VariableFilter
 from blocks.roles import WEIGHT, INITIAL_STATE, add_role
 from blocks.graph import ComputationGraph, apply_noise, apply_dropout
 
+rng = RandomStreams()
+
 class TRectifier(Activation):
     @application(inputs=['input_'], outputs=['output'])
     def apply(self, input_):
@@ -21,8 +25,8 @@ class TRectifier(Activation):
 # An epoch will be composed of 'num_seqs' sequences of len 'seq_len'
 # divided in chunks of lengh 'seq_div_size'
 num_seqs = 10
-seq_len = 2000
-seq_div_size = 100
+seq_len = 1000
+seq_div_size = 5
 
 io_dim = 256
 
@@ -36,20 +40,21 @@ output_hidden_activations = []
 
 weight_noise_std = 0.05
 
-output_h_dropout = 0.5
+output_h_dropout = 0.0
+drop_update = 0.0
 
-l1_state = 0.01
-l1_reset = 0.01
+l1_state = 0.00
+l1_reset = 0.1
 
 step_rule = 'momentum'
-learning_rate = 0.01
+learning_rate = 0.001
 momentum = 0.99
 
 
-param_desc = '%s,t%s,o%s-n%s-d%s-L1:%s,%s-%s' % (
+param_desc = '%s,t%s,o%s-n%s-d%s,%s-L1:%s,%s-%s' % (
                  repr(state_dim), repr(transition_hidden), repr(output_hidden),
                  repr(weight_noise_std),
-                 repr(output_h_dropout),
+                 repr(output_h_dropout), repr(drop_update),
                  repr(l1_state), repr(l1_reset),
                  step_rule
                 ) 
@@ -105,12 +110,14 @@ class DGSRNN(BaseRecurrent, Initializable):
             return self.state_dim
         return super(GFGRU, self).get_dim(name)
 
-    @recurrent(sequences=['inputs'], states=['state'],
+    @recurrent(sequences=['inputs', 'drop_updates_mask'], states=['state'],
                outputs=['state', 'reset'], contexts=[])
-    def apply(self, inputs=None, state=None):
+    def apply(self, inputs=None, drop_updates_mask=None, state=None):
         inter_v = self.inter.apply(tensor.concatenate([inputs, state], axis=1))
         reset_v = self.reset.apply(inter_v)
         update_v = self.update.apply(inter_v)
+
+        reset_v = reset_v * drop_updates_mask
 
         new_state = state * (1 - reset_v) + reset_v * update_v
 
@@ -141,7 +148,11 @@ class Model():
         prev_state = theano.shared(numpy.zeros((num_seqs, state_dim)).astype(theano.config.floatX),
                                    name='state')
 
-        states, resets = dgsrnn.apply(in_onehot.dimshuffle(1, 0, 2), state=prev_state)
+        states, resets = dgsrnn.apply(inputs=in_onehot.dimshuffle(1, 0, 2),
+                                      drop_updates_mask=rng.binomial(size=(inp.shape[1], inp.shape[0], state_dim),
+                                                                     p=1-drop_update,
+                                                                     dtype=theano.config.floatX),
+                                      state=prev_state)
         states = states.dimshuffle(1, 0, 2)
         resets = resets.dimshuffle(1, 0, 2)
 
