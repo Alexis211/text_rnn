@@ -2,6 +2,8 @@ import theano
 from theano import tensor
 import numpy
 
+from theano.tensor.shared_randomstreams import RandomStreams
+
 from blocks.algorithms import Momentum, AdaDelta, RMSProp
 from blocks.bricks import Tanh, Softmax, Linear, MLP, Initializable
 from blocks.bricks.lookup import LookupTable
@@ -12,19 +14,22 @@ from blocks.filter import VariableFilter
 from blocks.roles import WEIGHT
 from blocks.graph import ComputationGraph, apply_noise, apply_dropout
 
+rng = RandomStreams()
+
 # An epoch will be composed of 'num_seqs' sequences of len 'seq_len'
 # divided in chunks of lengh 'seq_div_size'
-num_seqs = 10
+num_seqs = 50
 seq_len = 2000
-seq_div_size = 200
+seq_div_size = 100
 
 io_dim = 256
 
 # Model structure
-hidden_dims = [256, 256, 256]
+hidden_dims = [512, 512, 512, 512, 512]
 activation_function = Tanh()
 
-cond_cert = [0.5, 0.5]
+cond_cert = [0.5, 0.5, 0.5, 0.5]
+block_prob = [0.1, 0.1, 0.1, 0.1]
 
 # Regularization
 w_noise_std = 0.02
@@ -35,8 +40,8 @@ learning_rate = 0.1
 momentum = 0.9
 
 
-param_desc = '%s(p%s)-n%s-%dx%d(%d)-%s' % (
-                 repr(hidden_dims), repr(cond_cert),
+param_desc = '%s(x%sp%s)-n%s-%dx%d(%d)-%s' % (
+                 repr(hidden_dims), repr(cond_cert), repr(block_prob),
                  repr(w_noise_std),
                  num_seqs, seq_len, seq_div_size,
                  step_rule
@@ -100,7 +105,7 @@ class CCHLSTM(BaseRecurrent, Initializable):
             self.layers.append((i0, i1, lstm, o))
 
 
-    @recurrent(sequences=['inputs'], contexts=[])
+    @recurrent(contexts=[])
     def apply(self, inputs, **kwargs):
 
         l0i, _, l0l, l0o = self.layers[0]
@@ -114,13 +119,13 @@ class CCHLSTM(BaseRecurrent, Initializable):
         pos = l0ov
         ps = new_states0
 
-        passnext = tensor.ones((inputs.shape[0], 1))
+        passnext = tensor.ones((inputs.shape[0],))
         out_sc = [new_states0, new_cells0, passnext]
 
         for i, (cch, (i0, i1, l, o)) in enumerate(zip(self.cond_cert, self.layers[1:])):
             pop = self.softmax.apply(pos)
             best = pop.max(axis=1)
-            passnext = passnext * tensor.le(best, cch)[:, None]
+            passnext = passnext * tensor.le(best, cch) * kwargs['pass%d'%i]
 
             i0v = i0.apply(inputs)
             i1v = i1.apply(ps)
@@ -131,12 +136,12 @@ class CCHLSTM(BaseRecurrent, Initializable):
                                             states=prev_states,
                                             cells=prev_cells,
                                             iterate=False)
-            new_states = tensor.switch(passnext, new_states, prev_states)
-            new_cells = tensor.switch(passnext, new_cells, prev_cells)
+            new_states = tensor.switch(passnext[:, None], new_states, prev_states)
+            new_cells = tensor.switch(passnext[:, None], new_cells, prev_cells)
             out_sc += [new_states, new_cells, passnext]
 
             ov = o.apply(new_states)
-            pos = tensor.switch(passnext, pos + ov, pos)
+            pos = tensor.switch(passnext[:, None], pos + ov, pos)
             ps = new_states
 
         return [pos] + out_sc
@@ -148,6 +153,10 @@ class CCHLSTM(BaseRecurrent, Initializable):
         if name in dims:
             return dims[name]
         return super(CCHLSTM, self).get_dim(name)
+
+    @apply.property('sequences')
+    def apply_sequences(self):
+        return ['inputs'] + ['pass%d'%i for i in range(len(self.hidden_dims)-1)]
 
     @apply.property('states')
     def apply_states(self):
@@ -183,9 +192,14 @@ class Model():
                           cond_cert=cond_cert,
                           activation=activation_function)
 
+        # Random pass
+        passdict = {}
+        for i, p in enumerate(block_prob):
+            passdict['pass%d'%i] = rng.binomial(size=(inp.shape[1], inp.shape[0]), p=1-p)
+
         # Apply it
         outs = cchlstm.apply(inputs=inp.dimshuffle(1, 0),
-                             **state_vars)
+                             **dict(state_vars.items() + passdict.items()))
         states = []
         active_prop = []
         for i in range(len(hidden_dims)):
