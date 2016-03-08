@@ -49,6 +49,7 @@ class Model():
                                  name='lstm_in2_%d'%i)
                 bricks += [linear1]
 
+            next_target = tensor.cast(next_target, dtype=theano.config.floatX)
             inter = linear.apply(theano.gradient.disconnected_grad(next_target))
             if i > 0:
                 inter += linear1.apply(theano.gradient.disconnected_grad(hidden[-1][:-1,:,:]))
@@ -60,9 +61,10 @@ class Model():
 
             hidden += [tensor.concatenate([init_state[None,:,:], new_hidden],axis=0)]
             pred = tanh.apply(linear2.apply(hidden[-1][:-1,:,:]))
+            costs += [numpy.float32(cf) * (-next_target * pred).sum(axis=2).mean()]
+            costs += [numpy.float32(cf) * q * abs(pred).sum(axis=2).mean()]
             diff = next_target - pred
-            costs += [numpy.float32(cf) * ((abs(next_target)+q)*(diff**2)).sum(axis=2).mean()]
-            next_target = diff*esf
+            next_target = tensor.ge(diff, 0.5) - tensor.le(diff, -0.5)
 
 
         # Construct output from hidden states
@@ -74,7 +76,7 @@ class Model():
             pred_linear = Linear(input_dim=dim, output_dim=out_dims[0],
                                 name='pred_linear_%d'%i)
             bricks.append(pred_linear)
-            lin = state if i == 0 else theano.gradient.disconnected_grad(state)
+            lin = theano.gradient.disconnected_grad(state)
             out_parts.append(pred_linear.apply(lin))
 
         # Do prediction and calculate cost
@@ -98,7 +100,7 @@ class Model():
         error_rate = tensor.neq(inp.flatten(), pred[:,:-1].flatten()).mean()
 
         sgd_cost = cost + sum(costs)
-
+            
         # Initialize all bricks
         for brick in bricks:
             brick.weights_init = IsotropicGaussian(0.1)

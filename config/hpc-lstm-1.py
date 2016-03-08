@@ -13,8 +13,8 @@ seq_len = 2000
 seq_div_size = 100
 
 hidden_dims = [128, 128, 256, 512]
-cost_factors = [1., 1., 1., 1.]
-hidden_q = [0.1, 0.2, 0.2, 0.4]
+cost_factors = [10., 1., 1., 1.]
+hidden_q = [0.1, 0.15, 0.22, 0.33]
 error_scale_factor = [2., 1.5, 1.5, 1.5]
 activation_function = Tanh()
 
