@@ -27,7 +27,7 @@ class SaveLoadParams(SimpleExtension):
 				logger.info('Loading parameters from %s...'%self.path)
 				self.model.set_parameter_values(cPickle.load(f))
 		except IOError:
-			pass
+			logger.warn('No previous parameters found at %s...'%self.path)
 
 	def do(self, which_callback, *args):
 		if which_callback == 'before_training':
