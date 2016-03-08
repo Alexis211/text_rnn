@@ -28,7 +28,10 @@ class Model():
         hidden = []
         costs = []
         next_target = in_onehot.dimshuffle(1, 0, 2)
-        for i, (hdim, cf, q) in enumerate(zip(config.hidden_dims, config.cost_factors, config.hidden_q)):
+        for i, (hdim, cf, q, esf) in enumerate(zip(config.hidden_dims,
+                                                   config.cost_factors,
+                                                   config.hidden_q,
+                                                   config.error_scale_factor)):
             init_state = theano.shared(numpy.zeros((config.num_seqs, hdim)).astype(theano.config.floatX),
                                        name='st0_%d'%i)
             init_cell = theano.shared(numpy.zeros((config.num_seqs, hdim)).astype(theano.config.floatX),
@@ -41,19 +44,25 @@ class Model():
             linear2 = Linear(input_dim=hdim, output_dim=config.io_dim, name='lstm_out_%d'%i)
             tanh = Tanh('lstm_out_tanh_%d'%i)
             bricks += [linear, lstm, linear2, tanh]
+            if i > 0:
+                linear1 = Linear(input_dim=config.hidden_dims[i-1], output_dim=4*hdim,
+                                 name='lstm_in2_%d'%i)
+                bricks += [linear1]
 
             inter = linear.apply(theano.gradient.disconnected_grad(next_target))
+            if i > 0:
+                inter += linear1.apply(theano.gradient.disconnected_grad(hidden[-1][:-1,:,:]))
             new_hidden, new_cells = lstm.apply(inter,
                                                states=init_state,
                                                cells=init_cell)
             states.append((init_state, new_hidden[-1, :, :]))
             states.append((init_cell, new_cells[-1, :, :]))
 
-            hidden += [tensor.concatenate([init_state[None,:,:], new_hidden[:-1,:,:]],axis=0)]
-            pred = tanh.apply(linear2.apply(hidden[-1]))
+            hidden += [tensor.concatenate([init_state[None,:,:], new_hidden],axis=0)]
+            pred = tanh.apply(linear2.apply(hidden[-1][:-1,:,:]))
             diff = next_target - pred
             costs += [numpy.float32(cf) * ((abs(next_target)+q)*(diff**2)).sum(axis=2).mean()]
-            next_target = diff
+            next_target = diff*esf
 
 
         # Construct output from hidden states
@@ -65,7 +74,8 @@ class Model():
             pred_linear = Linear(input_dim=dim, output_dim=out_dims[0],
                                 name='pred_linear_%d'%i)
             bricks.append(pred_linear)
-            out_parts.append(pred_linear.apply(theano.gradient.disconnected_grad(state)))
+            lin = state if i == 0 else theano.gradient.disconnected_grad(state)
+            out_parts.append(pred_linear.apply(lin))
 
         # Do prediction and calculate cost
         out = sum(out_parts)
@@ -77,14 +87,15 @@ class Model():
                                  +[Identity()],
                       name='out_mlp')
             bricks.append(mlp)
-            out = mlp.apply(out.reshape((inp.shape[0]*inp.shape[1],-1))).reshape((inp.shape[0],inp.shape[1],-1))
+            out = mlp.apply(out.reshape((inp.shape[0]*(inp.shape[1]+1),-1))
+                           ).reshape((inp.shape[0],inp.shape[1]+1,-1))
 
         pred = out.argmax(axis=2)
 
         cost = Softmax().categorical_cross_entropy(inp.flatten(),
-                                                   out.reshape((inp.shape[0]*inp.shape[1],
+                                                   out[:,:-1,:].reshape((inp.shape[0]*inp.shape[1],
                                                                 config.io_dim))).mean()
-        error_rate = tensor.neq(inp.flatten(), pred.flatten()).mean()
+        error_rate = tensor.neq(inp.flatten(), pred[:,:-1].flatten()).mean()
 
         sgd_cost = cost + sum(costs)
 
@@ -106,8 +117,8 @@ class Model():
         self.monitor_vars = [costs, [cost],
                              [error_rate]]
 
-        self.out = out
-        self.pred = pred
+        self.out = out[:,1:,:]
+        self.pred = pred[:,1:]
 
         self.states = states
 
