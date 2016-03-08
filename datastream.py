@@ -38,6 +38,7 @@ class BinaryFileDataset(Dataset):
         return os.fstat(self.f.fileno()).st_size
 
 class RandomBlockIterator(IterationScheme):
+    requests_examples=True
     def __init__(self, item_range, seq_len, num_seqs_per_epoch, **kwargs):
         self.seq_len = seq_len
         self.num_seqs = num_seqs_per_epoch

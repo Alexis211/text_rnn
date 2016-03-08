@@ -46,7 +46,7 @@ class GenText(SimpleExtension):
         sys.stdout.write(self.init_text)
         while v.shape[1] < self.max_bytes:
             prob = prob / 1.00001
-            pred = numpy.random.multinomial(1, prob[0, :]).nonzero()[0][0]
+            pred = numpy.random.multinomial(1, prob[0, :]).nonzero()[0][0].astype('int16')
 
             v = numpy.concatenate([v, pred[None, None]], axis=1)
             sys.stdout.write(chr(int(pred)))

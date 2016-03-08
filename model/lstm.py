@@ -2,8 +2,7 @@ import theano
 from theano import tensor
 import numpy
 
-from blocks.algorithms import Momentum, AdaDelta, RMSProp
-from blocks.bricks import Tanh, Softmax, Linear, MLP
+from blocks.bricks import Softmax, Linear
 from blocks.bricks.recurrent import LSTM
 from blocks.initialization import IsotropicGaussian, Constant
 
@@ -11,75 +10,24 @@ from blocks.filter import VariableFilter
 from blocks.roles import WEIGHT
 from blocks.graph import ComputationGraph, apply_noise, apply_dropout
 
-# An epoch will be composed of 'num_seqs' sequences of len 'seq_len'
-# divided in chunks of lengh 'seq_div_size'
-num_seqs = 20
-seq_len = 5000
-seq_div_size = 200
-
-io_dim = 256
-
-hidden_dims = [1024, 1024, 1024]
-activation_function = Tanh()
-
-i2h_all = True             # input to all hidden layers or only first layer
-h2o_all = True             # all hiden layers to output or only last layer
-
-w_noise_std = 0.02
-i_dropout = 0.5
-
-l1_reg = 0
-
-step_rule = 'adadelta'
-learning_rate = 0.1
-momentum = 0.9
-
-
-param_desc = '%s-%sIH,%sHO-n%s-d%s-l1r%s-%dx%d(%d)-%s' % (
-                 repr(hidden_dims),
-                 'all' if i2h_all else 'first',
-                 'all' if h2o_all else 'last',
-                 repr(w_noise_std),
-                 repr(i_dropout),
-                 repr(l1_reg),
-                 num_seqs, seq_len, seq_div_size,
-                 step_rule
-                ) 
-
-save_freq = 5
-on_irc = True
-
-# parameters for sample generation
-sample_len = 1000
-sample_temperature = 0.7 #0.5
-sample_freq = None
-
-if step_rule == 'rmsprop':
-    step_rule = RMSProp()
-elif step_rule == 'adadelta':
-    step_rule = AdaDelta()
-elif step_rule == 'momentum':
-    step_rule = Momentum(learning_rate=learning_rate, momentum=momentum)
-else:
-    assert(False)
 
 class Model():
-    def __init__(self):
-        inp = tensor.lmatrix('bytes')
+    def __init__(self, config):
+        inp = tensor.imatrix('bytes')
 
-        in_onehot = tensor.eq(tensor.arange(io_dim, dtype='int16').reshape((1, 1, io_dim)),
+        in_onehot = tensor.eq(tensor.arange(config.io_dim, dtype='int16').reshape((1, 1, config.io_dim)),
                               inp[:, :, None])
         in_onehot.name = 'in_onehot'
 
         # Construct hidden states
-        dims = [io_dim] + hidden_dims
+        dims = [config.io_dim] + config.hidden_dims
         hidden = [in_onehot.dimshuffle(1, 0, 2)]
         bricks = []
         states = []
         for i in xrange(1, len(dims)):
-            init_state = theano.shared(numpy.zeros((num_seqs, dims[i])).astype(theano.config.floatX),
+            init_state = theano.shared(numpy.zeros((config.num_seqs, dims[i])).astype(theano.config.floatX),
                                        name='st0_%d'%i)
-            init_cell = theano.shared(numpy.zeros((num_seqs, dims[i])).astype(theano.config.floatX),
+            init_cell = theano.shared(numpy.zeros((config.num_seqs, dims[i])).astype(theano.config.floatX),
                                        name='cell0_%d'%i)
 
             linear = Linear(input_dim=dims[i-1], output_dim=4*dims[i],
@@ -87,14 +35,14 @@ class Model():
             bricks.append(linear)
             inter = linear.apply(hidden[-1])
 
-            if i2h_all and i > 1:
+            if config.i2h_all and i > 1:
                 linear2 = Linear(input_dim=dims[0], output_dim=4*dims[i],
                                  name="lstm_in0_%d"%i)
                 bricks.append(linear2)
                 inter = inter + linear2.apply(hidden[0])
                 inter.name = 'inter_bis_%d'%i
 
-            lstm = LSTM(dim=dims[i], activation=activation_function,
+            lstm = LSTM(dim=dims[i], activation=config.activation_function,
                         name="lstm_rec_%d"%i)
             bricks.append(lstm)
 
@@ -111,10 +59,10 @@ class Model():
         # Construct output from hidden states
         out = None
         layers = zip(dims, hidden)[1:]
-        if not h2o_all:
+        if not config.h2o_all:
             layers = [layers[-1]]
         for i, (dim, state) in enumerate(layers):
-            top_linear = Linear(input_dim=dim, output_dim=io_dim,
+            top_linear = Linear(input_dim=dim, output_dim=config.io_dim,
                                 name='top_linear_%d'%i)
             bricks.append(top_linear)
             out_i = top_linear.apply(state)
@@ -126,7 +74,7 @@ class Model():
 
         cost = Softmax().categorical_cross_entropy(inp[:, 1:].flatten(),
                                                    out[:, :-1, :].reshape((inp.shape[0]*(inp.shape[1]-1),
-                                                                           io_dim)))
+                                                                           config.io_dim))).mean()
         error_rate = tensor.neq(inp[:, 1:].flatten(), pred[:, :-1].flatten()).mean()
 
         # Initialize all bricks
@@ -137,24 +85,35 @@ class Model():
 
         # Apply noise and dropout
         cg = ComputationGraph([cost, error_rate])
-        if w_noise_std > 0:
+        if config.w_noise_std > 0:
             noise_vars = VariableFilter(roles=[WEIGHT])(cg)
-            cg = apply_noise(cg, noise_vars, w_noise_std)
-        if i_dropout > 0:
-            cg = apply_dropout(cg, hidden[1:], i_dropout)
+            cg = apply_noise(cg, noise_vars, config.w_noise_std)
+        if config.i_dropout > 0:
+            cg = apply_dropout(cg, hidden[1:], config.i_dropout)
         [cost_reg, error_rate_reg] = cg.outputs
 
         # add l1 regularization
-        if l1_reg > 0:
+        if config.l1_reg > 0:
             l1pen = sum(abs(st).mean() for st in hidden[1:])
-            cost_reg = cost_reg + l1_reg * l1pen
+            cost_reg = cost_reg + config.l1_reg * l1pen
 
-        self.cost = cost
-        self.error_rate = error_rate
-        self.cost_reg = cost_reg
-        self.error_rate_reg = error_rate_reg
+        cost_reg += 1e-10           # so that it is not the same Theano variable
+        error_rate_reg += 1e-10
+
+        # put stuff into self that is usefull for training or extensions
+        self.sgd_cost = cost_reg
+
+        cost.name = 'cost'
+        cost_reg.name = 'cost_reg'
+        error_rate.name = 'error_rate'
+        error_rate_reg.name = 'error_rate_reg'
+        self.monitor_vars = [[cost, cost_reg],
+                             [error_rate, error_rate_reg]]
+
         self.out = out
         self.pred = pred
 
         self.states = states
 
+
+#  vim: set sts=4 ts=4 sw=4 tw=0 et :

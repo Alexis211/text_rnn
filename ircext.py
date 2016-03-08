@@ -125,5 +125,9 @@ class IRCClientExt(SimpleExtension):
     def do(self, which_callback, *args):
         logger.info('Polling...')
         self.irc.reactor.process_once()
+    
+    def run_forever(self):
+        self.irc.reactor.process_forever()
 
 
+# vim: set sts=4 ts=4 sw=4 tw=0 et :
