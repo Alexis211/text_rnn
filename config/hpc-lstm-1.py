@@ -1,10 +1,17 @@
+import numpy
+from numpy.random import RandomState
+
 from blocks.algorithms import AdaDelta, Momentum
 from blocks.bricks import Tanh, Rectifier
 
 from model.hpc_lstm import Model
 
 dataset = 'data/logcompil-2016-03-07.txt'
+
 io_dim = 256
+repr_dim = 512
+embedding_matrix = (RandomState(42).binomial(1, 20./512., ((io_dim, repr_dim)))
+                   -RandomState(123).binomial(1, 20./512., ((io_dim, repr_dim))))
 
 # An epoch will be composed of 'num_seqs' sequences of len 'seq_len'
 # divided in chunks of lengh 'seq_div_size'
@@ -13,9 +20,8 @@ seq_len = 2000
 seq_div_size = 100
 
 hidden_dims = [128, 128, 256, 512]
-cost_factors = [10., 1., 1., 1.]
+cost_factors = [1., 1., 1., 1.]
 hidden_q = [0.1, 0.15, 0.22, 0.33]
-error_scale_factor = [2., 1.5, 1.5, 1.5]
 activation_function = Tanh()
 
 out_hidden = [512]
