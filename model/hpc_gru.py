@@ -1,12 +1,11 @@
-# HPC-LSTM : Hierarchical Predictive Coding LSTM
+# HPC-GRU : Hierarchical Predictive Coding GRU
 
 import theano
 from theano import tensor
 import numpy
 
 from blocks.bricks import Softmax, Tanh, Logistic, Linear, MLP, Identity
-from blocks.bricks.recurrent import LSTM
-from blocks.initialization import IsotropicGaussian, Constant
+from blocks.bricks.recurrent import GatedRecurrent
 
 from blocks.filter import VariableFilter
 from blocks.roles import WEIGHT
@@ -25,7 +24,7 @@ class Model():
         bricks = []
         states = []
 
-        # Construct predictive LSTM hierarchy
+        # Construct predictive GRU hierarchy
         hidden = []
         costs = []
         next_target = in_repr.dimshuffle(1, 0, 2)
@@ -34,18 +33,16 @@ class Model():
                                                    config.hidden_q)):
             init_state = theano.shared(numpy.zeros((config.num_seqs, hdim)).astype(theano.config.floatX),
                                        name='st0_%d'%i)
-            init_cell = theano.shared(numpy.zeros((config.num_seqs, hdim)).astype(theano.config.floatX),
-                                       name='cell0_%d'%i)
 
-            linear = Linear(input_dim=config.repr_dim, output_dim=4*hdim,
+            linear = Linear(input_dim=config.repr_dim, output_dim=3*hdim,
                             name="lstm_in_%d"%i)
-            lstm = LSTM(dim=hdim, activation=config.activation_function,
+            lstm = GatedRecurrent(dim=hdim, activation=config.activation_function,
                         name="lstm_rec_%d"%i)
             linear2 = Linear(input_dim=hdim, output_dim=config.repr_dim, name='lstm_out_%d'%i)
             tanh = Tanh('lstm_out_tanh_%d'%i)
             bricks += [linear, lstm, linear2, tanh]
             if i > 0:
-                linear1 = Linear(input_dim=config.hidden_dims[i-1], output_dim=4*hdim,
+                linear1 = Linear(input_dim=config.hidden_dims[i-1], output_dim=3*hdim,
                                  name='lstm_in2_%d'%i)
                 bricks += [linear1]
 
@@ -53,11 +50,10 @@ class Model():
             inter = linear.apply(theano.gradient.disconnected_grad(next_target))
             if i > 0:
                 inter += linear1.apply(theano.gradient.disconnected_grad(hidden[-1][:-1,:,:]))
-            new_hidden, new_cells = lstm.apply(inter,
-                                               states=init_state,
-                                               cells=init_cell)
+            new_hidden = lstm.apply(inputs=inter[:,:,:hdim],
+                                    gate_inputs=inter[:,:,hdim:],
+                                    states=init_state)
             states.append((init_state, new_hidden[-1, :, :]))
-            states.append((init_cell, new_cells[-1, :, :]))
 
             hidden += [tensor.concatenate([init_state[None,:,:], new_hidden],axis=0)]
             pred = tanh.apply(linear2.apply(hidden[-1][:-1,:,:]))

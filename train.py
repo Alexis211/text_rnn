@@ -70,11 +70,11 @@ if __name__ == "__main__":
 
     monitor_vars = list(set(v for p in m.monitor_vars for v in p))
     extensions = [
+            ProgressBar(),
             TrainingDataMonitoring(
                 monitor_vars,
                 prefix='train', every_n_batches=config.monitor_freq),
             Printing(every_n_batches=config.monitor_freq, after_epoch=False),
-            ProgressBar(),
 
             ResetStates([v for v, _ in m.states], after_epoch=True)
     ]
