@@ -15,8 +15,8 @@ class Model():
     def __init__(self, config):
         inp = tensor.imatrix('bytes')
 
-        in_onehot = tensor.eq(tensor.arange(config.io_dim, dtype='int16').reshape((1, 1, config.io_dim)),
-                              inp[:, :, None])
+        in_onehot = tensor.eq(tensor.arange(config.io_dim, dtype='int32').reshape((1, 1, config.io_dim)),
+                              inp[:, :, None]).astype(theano.config.floatX)
         in_onehot.name = 'in_onehot'
 
         # Construct hidden states
@@ -54,6 +54,9 @@ class Model():
 
             hidden.append(new_hidden)
 
+        for i, (u, v) in enumerate(states):
+            print "****     state", i, u.dtype, v.dtype
+
         hidden = [s.dimshuffle(1, 0, 2) for s in hidden]
 
         # Construct output from hidden states
@@ -66,16 +69,22 @@ class Model():
                                 name='top_linear_%d'%i)
             bricks.append(top_linear)
             out_i = top_linear.apply(state)
+            print "****         out", i, out_i.dtype
             out = out_i if out is None else out + out_i
             out.name = 'out_part_%d'%i
 
         # Do prediction and calculate cost
-        pred = out.argmax(axis=2)
+        pred = out.argmax(axis=2).astype('int32')
 
+        print "****         inp", inp.dtype
+        print "****         out", out.dtype
+        print "****         pred", pred.dtype
         cost = Softmax().categorical_cross_entropy(inp[:, 1:].flatten(),
                                                    out[:, :-1, :].reshape((inp.shape[0]*(inp.shape[1]-1),
                                                                            config.io_dim))).mean()
-        error_rate = tensor.neq(inp[:, 1:].flatten(), pred[:, :-1].flatten()).mean()
+        error_rate = tensor.neq(inp[:, 1:].flatten(), pred[:, :-1].flatten()).astype(theano.config.floatX).mean()
+        print "****         cost", cost.dtype
+        print "****         error_rate", error_rate.dtype
 
         # Initialize all bricks
         for brick in bricks:
@@ -91,13 +100,15 @@ class Model():
         if config.i_dropout > 0:
             cg = apply_dropout(cg, hidden[1:], config.i_dropout)
         [cost_reg, error_rate_reg] = cg.outputs
+        print "****         cost_reg", cost_reg.dtype
+        print "****         error_rate_reg", error_rate_reg.dtype
 
         # add l1 regularization
         if config.l1_reg > 0:
             l1pen = sum(abs(st).mean() for st in hidden[1:])
             cost_reg = cost_reg + config.l1_reg * l1pen
 
-        cost_reg += 1e-10           # so that it is not the same Theano variable
+        cost_reg += 1e-10           # so that it is not the same Theano variable as cost
         error_rate_reg += 1e-10
 
         # put stuff into self that is usefull for training or extensions
@@ -107,8 +118,8 @@ class Model():
         cost_reg.name = 'cost_reg'
         error_rate.name = 'error_rate'
         error_rate_reg.name = 'error_rate_reg'
-        self.monitor_vars = [[cost, cost_reg],
-                             [error_rate, error_rate_reg]]
+        self.monitor_vars = [[cost_reg],
+                             [error_rate_reg]]
 
         self.out = out
         self.pred = pred
