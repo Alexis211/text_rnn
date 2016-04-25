@@ -13,9 +13,14 @@ seq_len = 5000
 seq_div_size = 200
 
 layers = [
-	{'dim':		1024},
-	{'dim':		1024},
-	{'dim':		1024},
+	{'dim':		1024,
+	 'xreg': 	(768, 0.1, 10, 10, 6)
+	},
+	{'dim':		1024,
+	 'xreg': 	(768, 0.1, 10, 10, 6)
+	},
+	{'dim':		1024,
+	},
 ]
 activation_function = Tanh()
 
