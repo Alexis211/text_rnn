@@ -3,14 +3,14 @@ from blocks.bricks import Tanh
 
 from model.lstm import Model
 
-dataset = 'data/logcompil-2016-03-07.txt'
+dataset = 'data/logcompil.txt'
 io_dim = 256
 
 # An epoch will be composed of 'num_seqs' sequences of len 'seq_len'
 # divided in chunks of lengh 'seq_div_size'
-num_seqs = 100
-seq_len = 2000
-seq_div_size = 100
+num_seqs = 50
+seq_len = 5000
+seq_div_size = 200
 
 hidden_dims = [1024, 1024, 1024]
 activation_function = Tanh()
@@ -26,7 +26,7 @@ l1_reg = 0
 step_rule = AdaDelta()
 
 # parameter saving freq (number of batches)
-monitor_freq = 10
+monitor_freq = 100
 save_freq = 100
 
 # used for sample generation and IRC mode

@@ -107,7 +107,7 @@ class IRCClient(SimpleIRCClient):
             else:
                 # feed phrase to bot
                 prob, = pred_f(self.str2data(s0+'\n'))
-                if self.nick in msg:
+                if any(x in msg.lower() for x in [self.nick, 'frigal']):
                     self.pred_until(pred_f, prob, '\t') 
                     prob, = pred_f(self.str2data(nick+': '))
                     rep = nick + ': ' + self.pred_until(pred_f, prob)
