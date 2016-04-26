@@ -1,5 +1,5 @@
 from blocks.algorithms import AdaDelta
-from blocks.bricks import Tanh
+from blocks.bricks import Tanh, Rectifier
 
 from model.lstm import Model
 
@@ -14,15 +14,15 @@ seq_div_size = 200
 
 layers = [
 	{'dim':		1024,
-	 'xreg': 	(768, 0.1, 10, 10, 10, 2)
+	 'xreg': 	(768, 0.1, 50, 5, 5)
 	},
 	{'dim':		1024,
-	 'xreg': 	(768, 0.1, 10, 10, 10, 5)
+	 'xreg': 	(768, 0.1, 50, 5, 5)
 	},
 	{'dim':		1024,
 	},
 ]
-activation_function = Tanh()
+activation_function = Rectifier()
 
 i2h_all = True             # input to all hidden layers or only first layer
 h2o_all = True             # all hiden layers to output or only last layer
