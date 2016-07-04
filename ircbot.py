@@ -16,6 +16,8 @@ import datastream
 from paramsaveload import SaveLoadParams
 from blocks.graph import ComputationGraph
 
+import random
+
 logging.basicConfig(level='INFO')
 logger = logging.getLogger(__name__)
 
@@ -67,11 +69,13 @@ class IRCClient(SimpleIRCClient):
     def str2data(self, s):
         return numpy.array([ord(x) for x in s], dtype='int16')[None, :]
 
-    def pred_until(self, pred_f, prob, delim='\n'):
+    def pred_until(self, pred_f, prob, delim='\n', forbid_first=None):
         s = ''
         while True:
             prob = prob / 1.00001
             pred = numpy.random.multinomial(1, prob[0, :]).nonzero()[0][0].astype('int16')
+            if forbid_first is not None and s == '' and int(pred) == forbid_first:
+                continue # try again
 
             s = s + chr(int(pred))
 
@@ -108,9 +112,11 @@ class IRCClient(SimpleIRCClient):
                 # feed phrase to bot
                 prob, = pred_f(self.str2data(s0+'\n'))
                 if any(x in msg.lower() for x in [self.nick, 'frigal']):
-                    self.pred_until(pred_f, prob, '\t') 
-                    prob, = pred_f(self.str2data(nick+': '))
-                    rep = nick + ': ' + self.pred_until(pred_f, prob)
+                    if random.uniform(0, 1) < 0.3:
+                        fromnick = self.pred_until(pred_f, prob, '\t', forbid_first=ord(nick[0])) 
+                        logger.info("from '%s'"%fromnick)
+                        prob, = pred_f(self.str2data(nick+': '))
+                        rep = nick + ': ' + self.pred_until(pred_f, prob)
         else:
             logger.warn('Recieved message on unknown channel: %s'%chan)
         
@@ -141,7 +147,7 @@ if __name__ == "__main__":
     server = 'clipper.ens.fr'
     port = 6667
     nick = 'frigo'
-    chans = ['#frigotest', '#courssysteme']
+    chans = ['#frigotest']
 
     irc = IRCClient(model=m,
                     sample_temperature=config.sample_temperature,

@@ -34,7 +34,8 @@ monitor_freq = 100
 save_freq = 100
 
 # used for sample generation and IRC mode
-sample_temperature = 0.7 #0.5
+#sample_temperature = 0.7 #0.5
+sample_temperature = 0.9 #0.5
 
 # do we want to generate samples at times during training?
 sample_len = 1000

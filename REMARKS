@@ -1,1 +1,2 @@
 - lstm-xreg-relu : does not converge at all, cost is stuck around 3.6 and error rate is 86%
+- lstm-xreg : converges very badly
