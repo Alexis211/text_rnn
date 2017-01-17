@@ -112,11 +112,11 @@ class IRCClient(SimpleIRCClient):
                 # feed phrase to bot
                 prob, = pred_f(self.str2data(s0+'\n'))
                 if any(x in msg.lower() for x in [self.nick, 'frigal']):
-                    if random.uniform(0, 1) < 0.3:
-                        fromnick = self.pred_until(pred_f, prob, '\t', forbid_first=ord(nick[0])) 
-                        logger.info("from '%s'"%fromnick)
-                        prob, = pred_f(self.str2data(nick+': '))
-                        rep = nick + ': ' + self.pred_until(pred_f, prob)
+                    # if random.uniform(0, 1) < 0.3:
+                    fromnick = self.pred_until(pred_f, prob, '\t', forbid_first=ord(nick[0])) 
+                    logger.info("from '%s'"%fromnick)
+                    prob, = pred_f(self.str2data(nick+': '))
+                    rep = nick + ': ' + self.pred_until(pred_f, prob)
         else:
             logger.warn('Recieved message on unknown channel: %s'%chan)
         
@@ -144,7 +144,7 @@ if __name__ == "__main__":
     saveload.do_load()
 
     # Build IRC client
-    server = 'clipper.ens.fr'
+    server = 'ulminfo.fr'
     port = 6667
     nick = 'frigo'
     chans = ['#frigotest']

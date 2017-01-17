@@ -3,13 +3,41 @@ from theano import tensor
 import numpy
 
 from blocks.bricks import Softmax, Linear
-from blocks.bricks.recurrent import LSTM
-from blocks.initialization import IsotropicGaussian, Constant
+from blocks.bricks.recurrent import recurrent, LSTM
 
 from blocks.filter import VariableFilter
 from blocks.roles import WEIGHT
 from blocks.graph import ComputationGraph, apply_noise, apply_dropout
 
+
+class CondLSTM(LSTM):
+    @recurrent(sequences=['inputs', 'run_mask', 'rst_in_mask', 'rst_out_mask'],
+               states=['states', 'cells'],
+               contexts=[], outputs=['states', 'cells', 'outputs'])
+    def apply_cond(self, inputs, states, cells, run_mask=None, rst_in_mask=None, rst_out_mask=None):
+        init_states, init_cells = self.initial_states(states.shape[0])
+
+        if rst_in_mask:
+            states = tensor.switch(rst_in_mask[:, None], init_states, states)
+            cells = tensor.switch(rst_in_mask[:, None], init_cells, cells)
+
+        states, cells = self.apply(iterate=False,
+                                   inputs=inputs, states=states, cells=cells,
+                                   mask=run_mask)
+
+        outputs = states
+
+        if rst_out_mask:
+            states = tensor.switch(rst_out_mask[:, None], init_states, states)
+            cells = tensor.switch(rst_out_mask[:, None], init_cells, cells)
+
+        return states, cells, outputs
+            
+
+def compare_matrix(inp, chars):
+    chars = numpy.array(map(ord, chars), dtype='int8')
+    assert(inp.ndim == 2)
+    return tensor.eq(inp[:, :, None], chars[None, None, :]).sum(axis=2).astype(theano.config.floatX)
 
 class Model():
     def __init__(self, config):
@@ -19,11 +47,13 @@ class Model():
                               inp[:, :, None]).astype(theano.config.floatX)
         in_onehot.name = 'in_onehot'
 
-        costs_xreg = []
-
+        hidden_dim = sum(p['dim'] for p in config.layers)
+        recvalues = tensor.concatenate([in_onehot.dimshuffle(1, 0, 2),
+                            tensor.zeros((inp.shape[1], inp.shape[0], hidden_dim))],
+                        axis=2)
+  
         # Construct hidden states
-        dims = [config.io_dim]
-        hidden = [in_onehot.dimshuffle(1, 0, 2)]
+        indim = config.io_dim
         bricks = []
         states = []
         for i in xrange(1, len(config.layers)+1):
@@ -34,61 +64,53 @@ class Model():
             init_cell = theano.shared(numpy.zeros((config.num_seqs, p['dim'])).astype(theano.config.floatX),
                                        name='cell0_%d'%i)
 
-            linear = Linear(input_dim=dims[i-1], output_dim=4*p['dim'],
+            linear = Linear(input_dim=indim, output_dim=4*p['dim'],
                             name="lstm_in_%d"%i)
             bricks.append(linear)
-            inter = linear.apply(hidden[-1])
+            inter = linear.apply(recvalues[:, :, :indim])
 
-            if config.i2h_all and i > 1:
-                linear2 = Linear(input_dim=dims[0], output_dim=4*p['dim'],
-                                 name="lstm_in0_%d"%i)
-                bricks.append(linear2)
-                inter = inter + linear2.apply(hidden[0])
-                inter.name = 'inter_bis_%d'%i
-
-            lstm = LSTM(dim=p['dim'], activation=config.activation_function,
+            lstm = CondLSTM(dim=p['dim'], activation=config.activation_function,
                         name="lstm_rec_%d"%i)
             bricks.append(lstm)
 
-            new_hidden, new_cells = lstm.apply(inter,
-                                               states=init_state,
-                                               cells=init_cell)
+            run_mask = None
+            if 'run_on' in p:
+                run_mask = compare_matrix(inp.T, p['run_on'])
+
+            rst_in_mask = None
+            if 'reset_before' in p:
+                rst_in_mask = compare_matrix(inp.T, p['reset_before'])
+
+            rst_out_mask = None
+            if 'reset_after' in p:
+                rst_out_mask = compare_matrix(inp.T, p['reset_after'])
+
+            new_hidden, new_cells, rec_out = \
+                        lstm.apply_cond(inputs=inter,
+                                        states=init_state, cells=init_cell,
+                                        run_mask=run_mask,
+                                        rst_in_mask=rst_in_mask, rst_out_mask=rst_out_mask)
             states.append((init_state, new_hidden[-1, :, :]))
             states.append((init_cell, new_cells[-1, :, :]))
 
-            if 'xreg' in p and p['xreg'] is not None:
-                n, s, w1, w2, w3, w4 = p['xreg']
-                cost_x1 = w1 * ((new_hidden.mean(axis=2) - s)**2).mean()
-                cost_x2 = w2 * ((new_hidden.mean(axis=(0,1)) - s)**2).mean()
-                cost_x3 = -w3 * abs(new_hidden - s).mean()
-                cost_x4 = w4 * abs(new_hidden[:-1,:,:]-new_hidden[1:,:,:]).mean()
-                cost_x1.name = 'cost_x1_%d'%i
-                cost_x2.name = 'cost_x2_%d'%i
-                cost_x3.name = 'cost_x3_%d'%i
-                cost_x4.name = 'cost_x4_%d'%i
-                costs_xreg += [cost_x1, cost_x2, cost_x3, cost_x4]
+            indim2 = indim + p['dim']
+            recvalues = tensor.set_subtensor(recvalues[:, :, indim:indim2],
+                                             rec_out)
+            indim = indim2
 
-            dims.append(p['dim'])
-            hidden.append(new_hidden)
 
+        print "**** recvalues", recvalues.dtype
         for i, (u, v) in enumerate(states):
             print "****     state", i, u.dtype, v.dtype
 
-        hidden = [s.dimshuffle(1, 0, 2) for s in hidden]
+        recvalues = recvalues.dimshuffle(1, 0, 2)
 
         # Construct output from hidden states
-        out = None
-        layers = zip(dims, hidden)[1:]
-        if not config.h2o_all:
-            layers = [layers[-1]]
-        for i, (dim, state) in enumerate(layers):
-            top_linear = Linear(input_dim=dim, output_dim=config.io_dim,
-                                name='top_linear_%d'%i)
-            bricks.append(top_linear)
-            out_i = top_linear.apply(state)
-            print "****         out", i, out_i.dtype
-            out = out_i if out is None else out + out_i
-            out.name = 'out_part_%d'%i
+        top_linear = Linear(input_dim=indim, output_dim=config.io_dim,
+                            name="top_linear")
+        bricks.append(top_linear)
+        out = top_linear.apply(recvalues)
+        out.name = 'out'
 
         # Do prediction and calculate cost
         pred = out.argmax(axis=2).astype('int32')
@@ -96,32 +118,28 @@ class Model():
         print "****         inp", inp.dtype
         print "****         out", out.dtype
         print "****         pred", pred.dtype
-        cost0 = Softmax().categorical_cross_entropy(inp[:, 1:].flatten(),
+        cost = Softmax().categorical_cross_entropy(inp[:, 1:].flatten(),
                                                    out[:, :-1, :].reshape((inp.shape[0]*(inp.shape[1]-1),
                                                                            config.io_dim))).mean()
-        cost0.name = 'cost0'
+        cost.name = 'cost'
         error_rate = tensor.neq(inp[:, 1:].flatten(), pred[:, :-1].flatten()).astype(theano.config.floatX).mean()
-        print "****         cost0", cost0.dtype
+        print "****         cost", cost.dtype
         print "****         error_rate", error_rate.dtype
-
-        costs = [cost0] + costs_xreg
-        cost = sum(costs)
 
         # Initialize all bricks
         for brick in bricks:
-            brick.weights_init = IsotropicGaussian(0.1)
-            brick.biases_init = Constant(0.)
+            brick.weights_init = config.weights_init
+            brick.biases_init = config.biases_init
             brick.initialize()
 
         # Apply noise and dropout
-        cg = ComputationGraph([cost, error_rate] + costs)
+        cg = ComputationGraph([cost, error_rate])
         if config.w_noise_std > 0:
             noise_vars = VariableFilter(roles=[WEIGHT])(cg)
             cg = apply_noise(cg, noise_vars, config.w_noise_std)
         if config.i_dropout > 0:
             cg = apply_dropout(cg, hidden[1:], config.i_dropout)
-        [cost_reg, error_rate_reg] = cg.outputs[:2]
-        costs_reg = cg.outputs[2:]
+        [cost_reg, error_rate_reg] = cg.outputs
         print "****         cost_reg", cost_reg.dtype
         print "****         error_rate_reg", error_rate_reg.dtype
 
@@ -143,8 +161,8 @@ class Model():
         cost_reg.name = 'cost_reg'
         error_rate.name = 'error_rate'
         error_rate_reg.name = 'error_rate_reg'
-        self.monitor_vars = [[cost_reg],
-                             costs_reg,
+        self.monitor_vars = [[cost],
+                             [cost_reg],
                              [error_rate_reg]]
 
         self.out = out
