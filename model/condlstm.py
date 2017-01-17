@@ -10,7 +10,7 @@ from blocks.roles import WEIGHT
 from blocks.graph import ComputationGraph, apply_noise, apply_dropout
 
 
-class CondLSTM(LSTM):
+class RstLSTM(LSTM):
     @recurrent(sequences=['inputs', 'run_mask', 'rst_in_mask', 'rst_out_mask'],
                states=['states', 'cells'],
                contexts=[], outputs=['states', 'cells', 'outputs'])
@@ -24,7 +24,6 @@ class CondLSTM(LSTM):
         states, cells = self.apply(iterate=False,
                                    inputs=inputs, states=states, cells=cells,
                                    mask=run_mask)
-
         outputs = states
 
         if rst_out_mask:
@@ -69,7 +68,7 @@ class Model():
             bricks.append(linear)
             inter = linear.apply(recvalues[:, :, :indim])
 
-            lstm = CondLSTM(dim=p['dim'], activation=config.activation_function,
+            lstm = RstLSTM(dim=p['dim'], activation=config.activation_function,
                         name="lstm_rec_%d"%i)
             bricks.append(lstm)
 
