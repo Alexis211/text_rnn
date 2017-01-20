@@ -11,7 +11,7 @@ io_dim = 256
 # divided in chunks of lengh 'seq_div_size'
 num_seqs = 50
 seq_len = 5000
-seq_div_size = 200
+seq_div_size = 500
 
 layers = [
 	# Slowlier
